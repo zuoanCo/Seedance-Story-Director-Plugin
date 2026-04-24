@@ -1,0 +1,14 @@
+{
+  "mode": "short_film",
+  "title": "river-town-return",
+  "text": "雨夜里，一个多年未归的女人拖着旧皮箱回到江边小城，沿街看见亮灯的小卖部、积水倒影和年轻时的自己一闪而过，最终在天亮前走到河堤。",
+  "directorStyle": "现实主义电影感，潮湿夜景，低饱和色彩，缓慢推进镜头",
+  "workspaceName": "river-town-project",
+  "assetReuseMode": "workspace_preferred",
+  "assetKinds": [
+    "character",
+    "scene",
+    "prop"
+  ],
+  "dryRun": true
+}

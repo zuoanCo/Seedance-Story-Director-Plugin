@@ -5,10 +5,12 @@
 核心能力：
 
 - 先做“导演级”拆解：故事扩写、人物/场景 bible、镜头语言、前后镜头桥接。
+- 自动产出基础物料参数：角色图、场景图、特殊道具图的参考 prompt、连续性锚点和 Seedance 提示片段。
+- 支持项目级 `workspace`：同一项目下沉淀共享物料资产，后续任务可直接复用、按旧物料微调，或只做任务级临时物料。
 - 针对 Seedance 单次最长约 15 秒的限制，自动拆成多个连续段落。
 - 对后续片段自动注入上一段视频作为 continuity reference，尽量减少人物、服装、景别、光线和运动节奏漂移。
 - 支持单视频生成测试，便于先验证账号、额度、模型和提示词风格。
-- 输出完整产物目录：计划 JSON、分镜 Markdown、每段视频、最终拼接成片、执行 manifest。
+- 输出完整产物目录：计划 JSON、分镜 Markdown、物料 JSON/Markdown、每段视频、最终拼接成片、执行 manifest。
 
 ## 1. 安装依赖
 
@@ -106,12 +108,12 @@ $env:DIRECTOR_OPENAI_API_KEY="your-openai-compatible-director-api-key"
 
 ### `seedance_story_video`
 
-把长文本变成完整短片。
+把长文本变成完整短片，并在需要时先沉淀角色/场景/道具物料。
 
 建议使用示例：
 
 ```text
-请调用 seedance_story_video，把这段故事改编成一支 2-3 分钟的电影感短片，强调写实镜头、人物一致性和自然转场。
+请调用 seedance_story_video，把这段故事改编成一支 2-3 分钟的电影感短片，使用 workspaceName=jiangnan-film，优先复用项目物料并补齐缺失的角色图、场景图和关键道具物料。
 ```
 
 ### `seedance_single_video_test`
@@ -122,6 +124,26 @@ $env:DIRECTOR_OPENAI_API_KEY="your-openai-compatible-director-api-key"
 
 ```text
 请调用 seedance_single_video_test，生成一个 8 秒的赛博雨夜街头镜头，人物从近景走向镜头，保留电影感与真实光影。
+```
+
+### `seedance_prepare_story_assets`
+
+只做剧情物料准备，不出视频。适合先沉淀角色图、场景图、特殊物件图的参数包。
+
+建议使用示例：
+
+```text
+请调用 seedance_prepare_story_assets，基于这段剧情为 workspaceName=river-town-project 产出角色、场景和道具物料，并尽量复用已有资产。
+```
+
+### `seedance_create_workspace`
+
+创建一个项目级 workspace，用来共享资产和后续任务 run。
+
+建议使用示例：
+
+```text
+请调用 seedance_create_workspace，创建一个名为 river-town-project 的项目工作区，用于沉淀这部短片的角色、场景和道具资产。
 ```
 
 ## 5. 本地单视频测试
@@ -153,17 +175,42 @@ pnpm test:single -- --input examples/single-video-request.json --dryRun
 执行完成后默认输出到：
 
 ```text
-.seedance-story-director/<slug>-<timestamp>/
+.seedance-story-director/assets/tasks/<slug>-<timestamp>/
 ```
 
 其中包括：
 
 - `plan.json`：导演与分镜计划
 - `storyboard.md`：适合人工 review 的镜头版脚本
+- `materials.json`：当前任务实际使用的物料索引
+- `materials/**/*.json`：角色图、场景图、道具图等物料参数
+- `materials/**/*.md`：适合人工 review 的物料简报
 - `manifest.json`：任务、URL、耗时、输出文件索引
 - `segments/*.json`：每段任务元数据
 - `segments/*.mp4`：下载到本地的分段视频
 - `final/*.mp4`：拼接后的成片
+
+如果传入 `workspaceName`，则目录会切到项目级共享空间：
+
+```text
+.seedance-story-director/workspaces/<workspace-slug>/
+  workspace.json
+  assets/
+    asset-library.json
+    materials/
+      characters/
+      scenes/
+      props/
+    runs/
+      <slug>-<timestamp>/
+```
+
+在 `workspace` 下：
+
+- 共享物料会写入 `assets/materials/**`
+- 当前任务 run 会写入 `assets/runs/<run-id>/`
+- 后续任务会优先参考 `asset-library.json` 里的旧物料
+- 如果同名物料被改写，会在旧物料基础上更新 revision，而不是完全丢掉历史上下文
 
 ## 7. 设计原则
 

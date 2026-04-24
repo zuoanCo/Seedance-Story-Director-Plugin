@@ -1,7 +1,7 @@
 {
   "name": "openclaw-seedance-director-plugin",
   "version": "0.1.0",
-  "description": "Enterprise-grade OpenClaw plugin that turns story text into stitched Seedance 2.0 short films with director-grade scene planning and continuity control.",
+  "description": "Enterprise-grade OpenClaw plugin that turns story text into reusable character/scene/prop assets and stitched Seedance 2.0 short films with director-grade continuity control.",
   "type": "module",
   "license": "MIT",
   "private": true,

@@ -1,4 +1,6 @@
 export type StoryVideoMode = "short_film" | "single_clip";
+export type MaterialAssetKind = "character" | "prop" | "scene";
+export type AssetReuseMode = "workspace_preferred" | "workspace_only" | "task_only";
 
 export type ReferenceAsset = {
   url: string;
@@ -21,9 +23,55 @@ export type StoryVideoRequest = {
   referenceAudios?: ReferenceAsset[];
   generateAudio?: boolean;
   watermark?: boolean;
+  workspaceName?: string;
+  workspaceDescription?: string;
+  assetReuseMode?: AssetReuseMode;
+  assetKinds?: MaterialAssetKind[];
+  generateAssetPack?: boolean;
   outputDir?: string;
   dryRun?: boolean;
   useFastModel?: boolean;
+};
+
+export type StoryMaterialAsset = {
+  id: string;
+  kind: MaterialAssetKind;
+  name: string;
+  summary: string;
+  visualDescription: string;
+  referencePrompt: string;
+  seedancePromptHint: string;
+  continuityAnchors: string[];
+};
+
+export type PersistedStoryMaterialAsset = StoryMaterialAsset & {
+  signature: string;
+  scope: "task" | "workspace";
+  status: "new" | "reused" | "updated" | "task_only";
+  revision: number;
+  fingerprint: string;
+  jsonPath: string;
+  briefPath: string;
+  workspaceName?: string;
+  basedOnAssetId?: string;
+};
+
+export type WorkspaceDescriptor = {
+  name: string;
+  slug: string;
+  description?: string;
+  rootDir: string;
+  assetsDir: string;
+  runsDir: string;
+  workspaceFilePath: string;
+  assetLibraryPath: string;
+};
+
+export type WorkspaceAssetLibrary = {
+  workspaceName: string;
+  workspaceSlug: string;
+  updatedAt: string;
+  assets: PersistedStoryMaterialAsset[];
 };
 
 export type SeedanceDirectorPluginConfig = {
@@ -78,6 +126,7 @@ export type SegmentPlan = {
   cameraLanguage: string;
   visualStyle: string;
   soundDesign: string;
+  assetIds: string[];
   continuityAnchors: string[];
   seedancePrompt: string;
 };
@@ -92,6 +141,7 @@ export type StoryVideoPlan = {
   totalTargetSeconds: number;
   voiceover?: string;
   musicBrief?: string;
+  materialAssets: StoryMaterialAsset[];
   segments: SegmentPlan[];
 };
 
@@ -133,11 +183,36 @@ export type StoryVideoRunManifest = {
   planPath: string;
   storyboardPath: string;
   manifestPath: string;
+  materialsIndexPath?: string;
   finalVideoPath?: string;
+  workspace?: WorkspaceDescriptor;
+  assetLibraryPath?: string;
   usedDirectorModel: boolean;
   segmentCount: number;
+  materials: PersistedStoryMaterialAsset[];
   segments: SegmentExecutionResult[];
   warnings: string[];
+};
+
+export type StoryAssetManifest = {
+  request: StoryVideoRequest;
+  configSnapshot: SeedanceDirectorPluginConfig;
+  plan: StoryVideoPlan;
+  runDir: string;
+  planPath: string;
+  storyboardPath: string;
+  manifestPath: string;
+  materialsIndexPath: string;
+  workspace?: WorkspaceDescriptor;
+  assetLibraryPath?: string;
+  usedDirectorModel: boolean;
+  materials: PersistedStoryMaterialAsset[];
+  warnings: string[];
+};
+
+export type WorkspaceCreationManifest = {
+  workspace: WorkspaceDescriptor;
+  created: boolean;
 };
 
 export type ProgressReporter = (message: string, details?: Record<string, unknown>) => void | Promise<void>;

@@ -1,5 +1,3 @@
-import path from "node:path";
-import { mkdir } from "node:fs/promises";
 import type {
   CreateTaskPayload,
   ProgressReporter,
@@ -8,15 +6,24 @@ import type {
   SeedanceDirectorPluginConfig,
   SegmentExecutionResult,
   SegmentPlan,
+  StoryAssetManifest,
+  StoryMaterialAsset,
   StoryVideoPlan,
   StoryVideoRequest,
   StoryVideoRunManifest,
+  WorkspaceCreationManifest,
 } from "./types.js";
 import { resolveConfig, requireArkApiKey } from "./config.js";
 import { createStoryPlan } from "./director.js";
 import { SeedanceClient } from "./seedance-client.js";
 import { stitchVideoSegments } from "./stitcher.js";
-import { downloadToFile, ensureDir, isHttpsUrl, nowStamp, slugify, writeJson, writeText } from "./utils.js";
+import {
+  applyResolvedAssetsToPlan,
+  ensureWorkspaceProject,
+  prepareMaterialAssets,
+  resolveStorageLayout,
+} from "./assets.js";
+import { downloadToFile, isHttpsUrl, writeJson, writeText } from "./utils.js";
 
 function normalizeReferenceAssets(items: string[] | ReferenceAsset[] | undefined, defaultRole: ReferenceAsset["role"]): ReferenceAsset[] {
   if (!items || items.length === 0) {
@@ -47,12 +54,27 @@ function estimateSegmentCount(request: StoryVideoRequest, config: SeedanceDirect
   return Math.min(config.planning.maxSegmentCount, Math.max(4, rough));
 }
 
+function buildSegmentPrompt(segment: SegmentPlan, materialAssets: Map<string, StoryMaterialAsset>): string {
+  const materialHints = (segment.assetIds || [])
+    .map((assetId) => materialAssets.get(assetId))
+    .filter((asset): asset is StoryMaterialAsset => Boolean(asset))
+    .map(
+      (asset) =>
+        `${asset.kind} ${asset.name}: ${asset.seedancePromptHint} Continuity anchors: ${asset.continuityAnchors.join(", ")}.`
+    );
+
+  return [segment.seedancePrompt, materialHints.length > 0 ? `Material continuity bible: ${materialHints.join(" ")}` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function buildContentForSegment(
   request: StoryVideoRequest,
   segment: SegmentPlan,
+  materialAssets: Map<string, StoryMaterialAsset>,
   previousRemoteVideoUrl?: string
 ): CreateTaskPayload["content"] {
-  const content: CreateTaskPayload["content"] = [{ type: "text", text: segment.seedancePrompt }];
+  const content: CreateTaskPayload["content"] = [{ type: "text", text: buildSegmentPrompt(segment, materialAssets) }];
 
   if (previousRemoteVideoUrl && isHttpsUrl(previousRemoteVideoUrl)) {
     content.push({
@@ -113,8 +135,22 @@ function createStoryboard(plan: StoryVideoPlan): string {
     "## World Bible",
     ...plan.worldBible.map((item) => `- ${item}`),
     "",
-    "## Segments",
+    "## Material Assets",
   ];
+
+  for (const asset of plan.materialAssets) {
+    lines.push("");
+    lines.push(`### ${asset.name}`);
+    lines.push(`- Kind: ${asset.kind}`);
+    lines.push(`- Summary: ${asset.summary}`);
+    lines.push(`- Visual: ${asset.visualDescription}`);
+    lines.push(`- Reference Prompt: ${asset.referencePrompt}`);
+    lines.push(`- Seedance Hint: ${asset.seedancePromptHint}`);
+    lines.push(`- Continuity: ${asset.continuityAnchors.join("; ")}`);
+  }
+
+  lines.push("");
+  lines.push("## Segments");
 
   for (const segment of plan.segments) {
     lines.push("");
@@ -126,6 +162,7 @@ function createStoryboard(plan: StoryVideoPlan): string {
     lines.push(`- Camera: ${segment.cameraLanguage}`);
     lines.push(`- Style: ${segment.visualStyle}`);
     lines.push(`- Sound: ${segment.soundDesign}`);
+    lines.push(`- Assets: ${segment.assetIds.join(", ") || "none"}`);
     if (segment.bridgeIn) {
       lines.push(`- Bridge In: ${segment.bridgeIn}`);
     }
@@ -152,87 +189,213 @@ function createStoryboard(plan: StoryVideoPlan): string {
   return `${lines.join("\n")}\n`;
 }
 
-export async function runStoryVideoPipeline(params: {
+function buildResolvedRequest(request: StoryVideoRequest): StoryVideoRequest {
+  return {
+    ...request,
+    generateAudio: request.generateAudio ?? false,
+    watermark: request.watermark ?? true,
+    generateAssetPack: request.generateAssetPack ?? request.mode === "short_film",
+  };
+}
+
+async function planStoryAssetsAndStorage(params: {
   request: StoryVideoRequest;
   rawConfig: unknown;
   runtime?: ResolvedRuntimeContext;
   progress?: ProgressReporter;
-}): Promise<StoryVideoRunManifest> {
+}): Promise<{
+  request: StoryVideoRequest;
+  config: SeedanceDirectorPluginConfig;
+  clipDurationSeconds: number;
+  aspectRatio: string;
+  plan: StoryVideoPlan;
+  usedDirectorModel: boolean;
+  runDir: string;
+  planPath: string;
+  storyboardPath: string;
+  manifestPath: string;
+  materialsIndexPath: string;
+  segmentsDir: string;
+  finalDir: string;
+  workspace?: StoryVideoRunManifest["workspace"];
+  assetLibraryPath?: string;
+  materials: StoryVideoRunManifest["materials"];
+}> {
   const rootDir = params.request.outputDir || params.runtime?.workspaceDir || process.cwd();
   const config = resolveConfig(params.rawConfig, { rootDir });
-  const request = {
-    ...params.request,
-    generateAudio: params.request.generateAudio ?? false,
-    watermark: params.request.watermark ?? true,
-  };
+  const request = buildResolvedRequest(params.request);
   const clipDurationSeconds = Math.min(15, Math.max(4, Math.round(request.clipDurationSeconds || config.planning.defaultClipDurationSeconds)));
   const aspectRatio = request.aspectRatio || config.planning.preferredAspectRatio;
   const segmentCount = estimateSegmentCount(request, config, clipDurationSeconds);
   const title = request.title || (request.mode === "single_clip" ? "single-video-test" : "seedance-story-video");
-  const runDir = path.join(config.rendering.outputDir, `${slugify(title)}-${nowStamp()}`);
-  const planPath = path.join(runDir, "plan.json");
-  const storyboardPath = path.join(runDir, "storyboard.md");
-  const manifestPath = path.join(runDir, "manifest.json");
-  const segmentsDir = path.join(runDir, "segments");
-  const finalDir = path.join(runDir, "final");
-
-  await ensureDir(runDir);
-  await mkdir(segmentsDir, { recursive: true });
-  await mkdir(finalDir, { recursive: true });
+  const layout = await resolveStorageLayout({
+    config,
+    request,
+    title,
+  });
 
   params.progress?.("planning_story_video", {
     title,
     segmentCount,
     clipDurationSeconds,
     aspectRatio,
+    workspaceName: layout.workspace?.name,
   });
 
-  const { plan, usedDirectorModel } = await createStoryPlan(request, config, {
+  const { plan: rawPlan, usedDirectorModel } = await createStoryPlan(request, config, {
     segmentCount,
     clipDurationSeconds,
     aspectRatio,
+    existingAssets: layout.workspaceLibrary.assets,
   });
 
-  await writeJson(planPath, plan);
-  await writeText(storyboardPath, createStoryboard(plan));
+  const preparedMaterials = request.generateAssetPack
+    ? await prepareMaterialAssets({
+        request,
+        plan: rawPlan,
+        layout,
+      })
+    : {
+        materials: [],
+        materialsIndexPath: layout.materialsIndexPath,
+        assetIdMap: new Map<string, string>(),
+        workspace: layout.workspace,
+        assetLibraryPath: layout.workspace?.assetLibraryPath,
+      };
 
-  const warnings: string[] = [];
-  const manifest: StoryVideoRunManifest = {
+  const plan = request.generateAssetPack
+    ? applyResolvedAssetsToPlan({
+        plan: rawPlan,
+        materials: preparedMaterials.materials,
+        assetIdMap: preparedMaterials.assetIdMap,
+      })
+    : rawPlan;
+
+  await writeJson(layout.planPath, plan);
+  await writeText(layout.storyboardPath, createStoryboard(plan));
+
+  return {
     request,
-    configSnapshot: config,
+    config,
+    clipDurationSeconds,
+    aspectRatio,
     plan,
-    runDir,
-    planPath,
-    storyboardPath,
-    manifestPath,
     usedDirectorModel,
-    segmentCount: plan.segments.length,
+    runDir: layout.runDir,
+    planPath: layout.planPath,
+    storyboardPath: layout.storyboardPath,
+    manifestPath: layout.manifestPath,
+    materialsIndexPath: preparedMaterials.materialsIndexPath,
+    segmentsDir: layout.segmentsDir,
+    finalDir: layout.finalDir,
+    workspace: preparedMaterials.workspace,
+    assetLibraryPath: preparedMaterials.assetLibraryPath,
+    materials: preparedMaterials.materials,
+  };
+}
+
+export async function createWorkspacePipeline(params: {
+  workspaceName: string;
+  workspaceDescription?: string;
+  outputDir?: string;
+  rawConfig: unknown;
+  runtime?: ResolvedRuntimeContext;
+}): Promise<WorkspaceCreationManifest> {
+  const rootDir = params.outputDir || params.runtime?.workspaceDir || process.cwd();
+  const config = resolveConfig(params.rawConfig, { rootDir });
+
+  return ensureWorkspaceProject({
+    config,
+    workspaceName: params.workspaceName,
+    workspaceDescription: params.workspaceDescription,
+  });
+}
+
+export async function runStoryAssetPipeline(params: {
+  request: StoryVideoRequest;
+  rawConfig: unknown;
+  runtime?: ResolvedRuntimeContext;
+  progress?: ProgressReporter;
+}): Promise<StoryAssetManifest> {
+  const prepared = await planStoryAssetsAndStorage(params);
+  const warnings: string[] = [];
+
+  const manifest: StoryAssetManifest = {
+    request: prepared.request,
+    configSnapshot: prepared.config,
+    plan: prepared.plan,
+    runDir: prepared.runDir,
+    planPath: prepared.planPath,
+    storyboardPath: prepared.storyboardPath,
+    manifestPath: prepared.manifestPath,
+    materialsIndexPath: prepared.materialsIndexPath,
+    workspace: prepared.workspace,
+    assetLibraryPath: prepared.assetLibraryPath,
+    usedDirectorModel: prepared.usedDirectorModel,
+    materials: prepared.materials,
+    warnings,
+  };
+
+  await writeJson(prepared.manifestPath, manifest);
+  return manifest;
+}
+
+export async function runStoryVideoPipeline(params: {
+  request: StoryVideoRequest;
+  rawConfig: unknown;
+  runtime?: ResolvedRuntimeContext;
+  progress?: ProgressReporter;
+}): Promise<StoryVideoRunManifest> {
+  const prepared = await planStoryAssetsAndStorage(params);
+  const warnings: string[] = [];
+  const materialAssets = new Map(prepared.plan.materialAssets.map((asset) => [asset.id, asset]));
+
+  const manifest: StoryVideoRunManifest = {
+    request: prepared.request,
+    configSnapshot: prepared.config,
+    plan: prepared.plan,
+    runDir: prepared.runDir,
+    planPath: prepared.planPath,
+    storyboardPath: prepared.storyboardPath,
+    manifestPath: prepared.manifestPath,
+    materialsIndexPath: prepared.materialsIndexPath,
+    workspace: prepared.workspace,
+    assetLibraryPath: prepared.assetLibraryPath,
+    usedDirectorModel: prepared.usedDirectorModel,
+    segmentCount: prepared.plan.segments.length,
+    materials: prepared.materials,
     segments: [],
     warnings,
   };
 
-  if (request.dryRun) {
-    await writeJson(manifestPath, manifest);
+  if (prepared.request.dryRun) {
+    await writeJson(prepared.manifestPath, manifest);
     return manifest;
   }
 
-  const apiKey = requireArkApiKey(config);
-  const client = new SeedanceClient(config, apiKey);
+  const apiKey = requireArkApiKey(prepared.config);
+  const client = new SeedanceClient(prepared.config, apiKey);
   let previousRemoteVideoUrl: string | undefined;
 
-  for (const segment of plan.segments) {
+  for (const segment of prepared.plan.segments) {
     params.progress?.("creating_segment", {
       segment: segment.index,
       title: segment.title,
+      assetIds: segment.assetIds,
     });
 
     const payload: CreateTaskPayload = {
-      model: request.model || (request.useFastModel ? config.ark.fastVideoModel : config.ark.videoModel),
-      content: buildContentForSegment(request, segment, config.planning.continuityMode === "video_reference" ? previousRemoteVideoUrl : undefined),
+      model: prepared.request.model || (prepared.request.useFastModel ? prepared.config.ark.fastVideoModel : prepared.config.ark.videoModel),
+      content: buildContentForSegment(
+        prepared.request,
+        segment,
+        materialAssets,
+        prepared.config.planning.continuityMode === "video_reference" ? previousRemoteVideoUrl : undefined
+      ),
       duration: segment.durationSeconds,
-      ratio: aspectRatio,
-      generate_audio: Boolean(request.generateAudio),
-      watermark: Boolean(request.watermark),
+      ratio: prepared.aspectRatio,
+      generate_audio: Boolean(prepared.request.generateAudio),
+      watermark: Boolean(prepared.request.watermark),
     };
 
     const created = await client.createTask(payload);
@@ -241,11 +404,11 @@ export async function runStoryVideoPipeline(params: {
       taskId: created.id,
     });
     const result = await client.waitForTask(created.id);
-    const metadataPath = path.join(segmentsDir, `segment-${String(segment.index).padStart(2, "0")}.json`);
+    const metadataPath = `${prepared.segmentsDir}/segment-${String(segment.index).padStart(2, "0")}.json`;
     let localVideoPath: string | undefined;
 
-    if (result.videoUrl && config.rendering.downloadRemoteOutputs) {
-      localVideoPath = path.join(segmentsDir, `segment-${String(segment.index).padStart(2, "0")}.mp4`);
+    if (result.videoUrl && prepared.config.rendering.downloadRemoteOutputs) {
+      localVideoPath = `${prepared.segmentsDir}/segment-${String(segment.index).padStart(2, "0")}.mp4`;
       await downloadToFile(result.videoUrl, localVideoPath);
     }
 
@@ -275,14 +438,14 @@ export async function runStoryVideoPipeline(params: {
     .map((item) => item.localVideoPath)
     .filter((item): item is string => Boolean(item));
 
-  if (config.rendering.stitchSegments && localSegmentFiles.length > 0) {
-    const finalVideoPath = path.join(finalDir, `${slugify(plan.title)}.mp4`);
+  if (prepared.config.rendering.stitchSegments && localSegmentFiles.length > 0) {
+    const finalVideoPath = `${prepared.finalDir}/${prepared.plan.title.replace(/[\\/:*?"<>|]+/g, "-")}.mp4`;
     try {
       const stitched = await stitchVideoSegments({
         inputFiles: localSegmentFiles,
         outputFile: finalVideoPath,
-        ffmpegPath: config.rendering.ffmpegPath,
-        hasAudio: Boolean(request.generateAudio),
+        ffmpegPath: prepared.config.rendering.ffmpegPath,
+        hasAudio: Boolean(prepared.request.generateAudio),
       });
       if (stitched.stitched) {
         manifest.finalVideoPath = stitched.outputFile;
@@ -294,6 +457,6 @@ export async function runStoryVideoPipeline(params: {
     }
   }
 
-  await writeJson(manifestPath, manifest);
+  await writeJson(prepared.manifestPath, manifest);
   return manifest;
 }

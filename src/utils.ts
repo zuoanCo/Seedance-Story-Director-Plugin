@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
@@ -30,6 +30,11 @@ export async function writeJson(filePath: string, value: unknown): Promise<void>
 export async function writeText(filePath: string, value: string): Promise<void> {
   await ensureDir(path.dirname(filePath));
   await writeFile(filePath, value, "utf8");
+}
+
+export async function readJson<T>(filePath: string): Promise<T> {
+  const content = await readFile(filePath, "utf8");
+  return JSON.parse(content) as T;
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {

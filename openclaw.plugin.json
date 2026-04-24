@@ -1,7 +1,7 @@
 {
   "id": "seedance-story-director",
   "name": "Seedance Story Director",
-  "description": "Turns raw story text into multi-shot Seedance 2.0 short videos with screenplay expansion, continuity control, and stitched deliverables.",
+  "description": "Turns raw story text into reusable story assets and multi-shot Seedance 2.0 short videos with screenplay expansion, continuity control, and stitched deliverables.",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
